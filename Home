@@ -1,0 +1,185 @@
+
+import { useState, useEffect } from "react";
+import { base44 } from "@/api/base44Client";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useNavigate } from "react-router-dom";
+import { createPageUrl } from "@/utils";
+import { Card, CardContent } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Bell, MessageCircle, Check, X, Loader2 } from "lucide-react";
+import { motion, AnimatePresence } from "framer-motion";
+import BellNotificationCard from "../components/bell/BellNotificationCard";
+import ActiveChatRoomCard from "../components/bell/ActiveChatRoomCard";
+
+export default function Home() {
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const [user, setUser] = useState(null);
+  const [isLoading, setIsLoading] = useState(true);
+
+  useEffect(() => {
+    const getUser = async () => {
+      try {
+        const currentUser = await base44.auth.me();
+        setUser(currentUser);
+      } catch (error) {
+        navigate(createPageUrl("Home"));
+      } finally {
+        setIsLoading(false);
+      }
+    };
+    getUser();
+  }, [navigate]);
+
+  const { data: notifications = [] } = useQuery({
+    queryKey: ['bellNotifications', user?.email],
+    queryFn: () => user ? base44.entities.BellNotification.filter({ 
+      to_email: user.email, 
+      status: "pending" 
+    }, '-created_date') : [],
+    enabled: !!user,
+    refetchInterval: 3000,
+    initialData: [],
+  });
+
+  const { data: chatRooms = [] } = useQuery({
+    queryKey: ['chatRooms', user?.email],
+    queryFn: async () => {
+      if (!user) return [];
+      const rooms = await base44.entities.ChatRoom.list('-updated_date');
+      return rooms.filter(room => 
+        room.status === "active" && 
+        (room.creator_email === user.email || room.participant_email === user.email)
+      );
+    },
+    enabled: !!user,
+    refetchInterval: 3000,
+    initialData: [],
+  });
+
+  const acceptNotificationMutation = useMutation({
+    mutationFn: async (notification) => {
+      await base44.entities.BellNotification.update(notification.id, { status: "accepted" });
+      
+      const room = await base44.entities.ChatRoom.create({
+        creator_email: notification.from_email,
+        creator_name: notification.from_name,
+        participant_email: notification.to_email,
+        participant_name: user.full_name,
+        status: "active",
+        last_message_at: new Date().toISOString()
+      });
+      
+      return room;
+    },
+    onSuccess: async (room) => {
+      await queryClient.invalidateQueries({ queryKey: ['bellNotifications'] });
+      await queryClient.invalidateQueries({ queryKey: ['chatRooms'] });
+      
+      // ルーム作成後、少し待ってから遷移
+      setTimeout(() => {
+        navigate(createPageUrl(`ChatRoom?roomId=${room.id}`));
+      }, 500);
+    },
+  });
+
+  const declineNotificationMutation = useMutation({
+    mutationFn: (notificationId) => 
+      base44.entities.BellNotification.update(notificationId, { status: "declined" }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['bellNotifications'] });
+    },
+  });
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center min-h-[60vh]">
+        <Loader2 className="w-8 h-8 animate-spin text-amber-600" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="max-w-4xl mx-auto px-4 py-8">
+      {/* ウェルカムセクション */}
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="mb-8"
+      >
+        <h2 className="text-3xl font-bold text-gray-800 mb-2">
+          こんにちは、{user?.full_name}さん
+        </h2>
+        <p className="text-gray-600">ベルを鳴らして会話を始めましょう</p>
+      </motion.div>
+
+      {/* 通知セクション */}
+      {notifications.length > 0 && (
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.1 }}
+          className="mb-8"
+        >
+          <h3 className="text-xl font-semibold text-gray-800 mb-4 flex items-center gap-2">
+            <Bell className="w-5 h-5 text-amber-600 animate-pulse" />
+            新しい呼び出し
+          </h3>
+          <div className="space-y-3">
+            <AnimatePresence>
+              {notifications.map((notification) => (
+                <BellNotificationCard
+                  key={notification.id}
+                  notification={notification}
+                  onAccept={() => acceptNotificationMutation.mutate(notification)}
+                  onDecline={() => declineNotificationMutation.mutate(notification.id)}
+                />
+              ))}
+            </AnimatePresence>
+          </div>
+        </motion.div>
+      )}
+
+      {/* アクティブなチャットルーム */}
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.2 }}
+      >
+        <h3 className="text-xl font-semibold text-gray-800 mb-4 flex items-center gap-2">
+          <MessageCircle className="w-5 h-5 text-blue-600" />
+          アクティブな会話
+        </h3>
+        
+        {chatRooms.length > 0 ? (
+          <div className="space-y-3">
+            <AnimatePresence>
+              {chatRooms.map((room) => (
+                <ActiveChatRoomCard
+                  key={room.id}
+                  room={room}
+                  currentUser={user}
+                  onClick={() => navigate(createPageUrl(`ChatRoom?roomId=${room.id}`))}
+                />
+              ))}
+            </AnimatePresence>
+          </div>
+        ) : (
+          <Card className="border-dashed border-2 border-gray-200">
+            <CardContent className="py-12 text-center">
+              <MessageCircle className="w-12 h-12 text-gray-300 mx-auto mb-4" />
+              <p className="text-gray-500 mb-4">まだ会話がありません</p>
+              <Button
+                onClick={() => navigate(createPageUrl("UserSelection"))}
+                className="bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700"
+              >
+                <Bell className="w-4 h-4 mr-2" />
+                呼び出しを開始
+              </Button>
+            </CardContent>
+          </Card>
+        )}
+      </motion.div>
+    </div>
+  );
+}
