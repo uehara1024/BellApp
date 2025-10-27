@@ -1,0 +1,175 @@
+import { useState, useEffect, useRef } from "react";
+import { base44 } from "@/api/base44Client";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useNavigate } from "react-router-dom";
+import { createPageUrl } from "@/utils";
+import { Button } from "@/components/ui/button";
+import { Bell, ArrowLeft, Loader2, AlertCircle } from "lucide-react";
+import { motion } from "framer-motion";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import MessageList from "../components/chat/MessageList";
+import MessageInput from "../components/chat/MessageInput";
+
+export default function ChatRoom() {
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const [user, setUser] = useState(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const messagesEndRef = useRef(null);
+  
+  const urlParams = new URLSearchParams(window.location.search);
+  const roomId = urlParams.get('roomId');
+
+  useEffect(() => {
+    const getUser = async () => {
+      try {
+        const currentUser = await base44.auth.me();
+        setUser(currentUser);
+      } catch (error) {
+        navigate(createPageUrl("Home"));
+      } finally {
+        setIsLoading(false);
+      }
+    };
+    getUser();
+  }, [navigate]);
+
+  const { data: room, isError, isLoading: roomLoading } = useQuery({
+    queryKey: ['chatRoom', roomId],
+    queryFn: async () => {
+      if (!roomId) return null;
+      const rooms = await base44.entities.ChatRoom.list();
+      const foundRoom = rooms.find(r => r.id === roomId);
+      return foundRoom || null;
+    },
+    enabled: !!roomId && !!user,
+    retry: 3,
+    retryDelay: 1000,
+  });
+
+  const { data: messages = [] } = useQuery({
+    queryKey: ['messages', roomId],
+    queryFn: () => base44.entities.Message.filter({ room_id: roomId }, 'created_date'),
+    enabled: !!roomId && !!room,
+    refetchInterval: 2000,
+    initialData: [],
+  });
+
+  const sendMessageMutation = useMutation({
+    mutationFn: async ({ content, imageUrl, messageType }) => {
+      const message = await base44.entities.Message.create({
+        room_id: roomId,
+        sender_email: user.email,
+        sender_name: user.full_name,
+        content: content || "",
+        image_url: imageUrl || "",
+        message_type: messageType
+      });
+      
+      await base44.entities.ChatRoom.update(roomId, {
+        last_message_at: new Date().toISOString()
+      });
+      
+      return message;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['messages', roomId] });
+      queryClient.invalidateQueries({ queryKey: ['chatRooms'] });
+    },
+  });
+
+  const closeRoomMutation = useMutation({
+    mutationFn: () => base44.entities.ChatRoom.update(roomId, { status: "closed" }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['chatRooms'] });
+      navigate(createPageUrl("Home"));
+    },
+  });
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
+
+  if (isLoading || roomLoading) {
+    return (
+      <div className="flex items-center justify-center min-h-[60vh]">
+        <Loader2 className="w-8 h-8 animate-spin text-amber-600" />
+      </div>
+    );
+  }
+
+  if (!roomId || !room || isError) {
+    return (
+      <div className="max-w-4xl mx-auto px-4 py-8">
+        <Alert variant="destructive">
+          <AlertCircle className="h-4 w-4" />
+          <AlertDescription>
+            チャットルームが見つかりません
+          </AlertDescription>
+        </Alert>
+        <Button
+          onClick={() => navigate(createPageUrl("Home"))}
+          className="mt-4"
+        >
+          ホームに戻る
+        </Button>
+      </div>
+    );
+  }
+
+  const isCreator = room.creator_email === user?.email;
+  const otherPersonName = isCreator ? room.participant_name : room.creator_name;
+
+  return (
+    <div className="max-w-4xl mx-auto px-4 h-[calc(100vh-8rem)] flex flex-col">
+      {/* ヘッダー */}
+      <motion.div
+        initial={{ opacity: 0, y: -20 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="flex items-center justify-between mb-4 bg-white/80 backdrop-blur-lg rounded-xl p-4 shadow-sm border border-amber-100"
+      >
+        <div className="flex items-center gap-3">
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => navigate(createPageUrl("Home"))}
+            className="hover:bg-amber-50"
+          >
+            <ArrowLeft className="w-5 h-5" />
+          </Button>
+          <div>
+            <h3 className="font-semibold text-lg text-gray-800">{otherPersonName}</h3>
+            <p className="text-sm text-gray-500">オンライン</p>
+          </div>
+        </div>
+        
+        {isCreator && (
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => closeRoomMutation.mutate()}
+            disabled={closeRoomMutation.isPending}
+            className="hover:bg-red-50 text-red-600"
+          >
+            <Bell className="w-5 h-5" />
+          </Button>
+        )}
+      </motion.div>
+
+      {/* メッセージエリア */}
+      <div className="flex-1 overflow-hidden bg-white/50 backdrop-blur-sm rounded-xl border border-amber-100 shadow-sm mb-4">
+        <MessageList 
+          messages={messages} 
+          currentUserEmail={user?.email}
+          messagesEndRef={messagesEndRef}
+        />
+      </div>
+
+      {/* 入力エリア */}
+      <MessageInput
+        onSend={sendMessageMutation.mutate}
+        isLoading={sendMessageMutation.isPending}
+      />
+    </div>
+  );
+}
